@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000" id="themeColor">
+  <meta name="color-scheme" content="dark light">
+  <title>Prayas Chat</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <script>
+    // Apply saved theme before first paint to avoid a flash.
+    (function () {
+      var t = localStorage.getItem("prayas-theme") || "dark";
+      if (t !== "system") document.documentElement.dataset.theme = t;
+    })();
+  </script>
+</head>
+<body>
+  <div id="splash" class="splash" aria-hidden="true">
+    <img src="icon.svg" width="72" height="72" alt="">
+    <div class="wordmark">Prayas Chat</div>
+  </div>
+  <main id="app"></main>
+  <dialog id="dlg"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <noscript>Prayas Chat needs JavaScript to run.</noscript>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

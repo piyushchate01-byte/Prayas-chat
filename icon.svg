@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Prayas Chat">
+  <rect width="512" height="512" rx="112" fill="#4C1D95"/>
+  <path d="M136 148h240a36 36 0 0 1 36 36v132a36 36 0 0 1-36 36H264l-72 60v-60h-56a36 36 0 0 1-36-36V184a36 36 0 0 1 36-36z" fill="#F3EEFF"/>
+  <path d="M196 292l60-62 60 62" fill="none" stroke="#4C1D95" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function verified() { return signedIn() && request.auth.token.email_verified == true; }
+    function inChat(chatId) { return signedIn() && request.auth.uid in chatId.split('_'); }
+
+    // ---------- Profiles ----------
+    function validNewProfile(d) {
+      return d.keys().hasOnly(['displayName', 'username', 'bio', 'createdAt'])
+        && d.displayName is string && d.displayName.size() >= 1 && d.displayName.size() <= 40
+        && d.username is string && d.username.matches('^[a-z0-9_]{3,20}$')
+        && d.bio is string && d.bio.size() <= 140
+        && d.createdAt == request.time;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();   // needed for user search; see README for limits
+      allow create: if verified() && request.auth.uid == uid
+        && validNewProfile(request.resource.data)
+        // the username must be reserved by this same user in the same write
+        && getAfter(/databases/$(database)/documents/usernames/$(request.resource.data.username)).data.uid == uid;
+      allow update: if verified() && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'bio'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 1 && request.resource.data.displayName.size() <= 40
+        && request.resource.data.bio is string && request.resource.data.bio.size() <= 140;
+      allow delete: if signedIn() && request.auth.uid == uid;
+
+      match /contacts/{otherUid} {
+        allow read, delete: if signedIn() && request.auth.uid == uid;
+        allow create: if verified() && request.auth.uid == uid && otherUid != uid
+          && request.resource.data.keys().hasOnly(['addedAt'])
+          && request.resource.data.addedAt == request.time;
+      }
+    }
+
+    // ---------- Unique usernames ----------
+    match /usernames/{name} {
+      allow read: if signedIn();
+      allow create: if verified() && name.matches('^[a-z0-9_]{3,20}$')
+        && request.resource.data.keys().hasOnly(['uid'])
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // ---------- Private chats ----------
+    // chatId = the two user IDs sorted and joined with "_"
+    match /chats/{chatId} {
+      allow get: if inChat(chatId);
+      allow list: if signedIn() && request.auth.uid in resource.data.members;
+      allow create: if verified() && inChat(chatId)
+        && request.resource.data.members.size() == 2
+        && chatId == request.resource.data.members[0] + '_' + request.resource.data.members[1]
+        && request.resource.data.keys().hasOnly(['members', 'lastMessage', 'lastMessageAt', 'unread']);
+      allow update: if verified() && request.auth.uid in resource.data.members
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt', 'unread']);
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if inChat(chatId);
+        allow create: if verified() && inChat(chatId)
+          && request.resource.data.keys().hasOnly(['senderId', 'text', 'createdAt', 'read'])
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() >= 1 && request.resource.data.text.size() <= 2000
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.read == false;
+        // only the recipient may flip "read" from false to true
+        allow update: if inChat(chatId)
+          && resource.data.senderId != request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+          && request.resource.data.read == true;
+        allow delete: if false;
+      }
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}

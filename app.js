@@ -99,10 +99,10 @@ const S = {
   chats: [], chat: null, contacts: [], contactIds: new Set(), lastResults: [],
   profiles: new Map()
 };
-let unsubChats = null, unsubMsgs = null;
+let unsubChats = null, unsubMsgs = null, unsubChatDoc = null;
 
 function stopChats() { if (unsubChats) { unsubChats(); unsubChats = null; } }
-function stopMsgs() { if (unsubMsgs) { unsubMsgs(); unsubMsgs = null; } }
+function stopMsgs() { if (unsubMsgs) { unsubMsgs(); unsubMsgs = null; } if (unsubChatDoc) { unsubChatDoc(); unsubChatDoc = null; } }
 function stopAll() { stopChats(); stopMsgs(); }
 
 async function getProfile(uid) {
@@ -172,7 +172,8 @@ function renderAuth() {
       <div class="field"><label for="email">Email</label>
         <input id="email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" required></div>
       ${mode === "reset" ? "" : `<div class="field"><label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="${mode === "login" ? "current-password" : "new-password"}" required>
+        <div class="pw"><input id="password" name="password" type="password" autocomplete="${mode === "login" ? "current-password" : "new-password"}" required>
+        <button type="button" class="pwtoggle" data-act="toggle-pw" aria-label="Show password" aria-pressed="false">Show</button></div>
         ${mode === "register" ? '<p class="hint">At least 8 characters.</p>' : ""}</div>`}
       <p id="formMsg" class="msg-error" role="alert"></p>
       <button class="btn" type="submit">${copy[2]}</button>
@@ -298,7 +299,7 @@ function renderChatList() {
   }
   el.innerHTML = `<ul class="list">${items.map(({ c, other, p }) => {
     const unread = (c.unread && c.unread[S.user.uid]) || 0;
-    const last = c.lastMessage ? `${c.lastMessage.senderId === S.user.uid ? "You: " : ""}${c.lastMessage.text}` : "";
+    const last = c.lastMessage ? (c.lastMessage.deleted ? "Message deleted" : `${c.lastMessage.senderId === S.user.uid ? "You: " : ""}${c.lastMessage.text}`) : "";
     return `<li><button class="item" data-act="open-chat" data-uid="${esc(other)}">${avatar(p)}
       <span class="body"><span class="name" style="display:block">${esc(p ? p.displayName : "…")}</span>
       <span class="preview" style="display:block">${esc(last)}</span></span>
@@ -387,7 +388,9 @@ async function invite() {
 async function openChat(otherUid) {
   await getProfile(otherUid);
   const id = [S.user.uid, otherUid].sort().join("_");
-  S.chat = { id, other: otherUid, limit: PAGE, msgs: [], hasMore: false, stick: true, prevCount: 0, loadingOlder: false, marking: new Set() };
+  stopChats();
+  S.chat = { id, other: otherUid, limit: PAGE, msgs: [], hasMore: false, stick: true, prevCount: 0, loadingOlder: false, marking: new Set(),
+    replyTo: null, editing: null, exists: false, meta: null, typingSent: 0, typingT: null };
   history.pushState({ chat: 1 }, "");
   render();
 }
@@ -397,12 +400,48 @@ window.addEventListener("popstate", () => { if (S.chat) closeChat(); });
 function renderChat() {
   const c = S.chat, p = S.profiles.get(c.other) || { displayName: "Unknown user", username: "" };
   app.innerHTML = `<header class="bar"><button class="iconbtn" data-act="back" aria-label="Back">${ICON.back}</button>
-      ${avatar(p)}<div><div class="title">${esc(p.displayName)}</div><div class="sub">${p.username ? "@" + esc(p.username) : ""}</div></div></header>
+      ${avatar(p)}<div><div class="title">${esc(p.displayName)}</div><div class="sub" id="chatSub" aria-live="polite">${p.username ? "@" + esc(p.username) : ""}</div></div></header>
     <div class="msgs" id="msgs" role="log" aria-live="polite" aria-label="Messages"></div>
+    <div class="replybar" id="replyBar" hidden></div>
     <form class="composer" data-form="send"><label class="sr" for="msgInput">Message</label>
       <textarea id="msgInput" name="text" rows="1" maxlength="2000" placeholder="${p.deleted ? "This account was deleted" : "Message"}" autocomplete="off" ${p.deleted ? "disabled" : ""}></textarea>
       <button class="sendbtn" type="submit" aria-label="Send message" ${p.deleted ? "disabled" : ""}>${ICON.send}</button></form>`;
   subscribeMessages();
+  subscribeChatDoc();
+}
+function subscribeChatDoc() {
+  const c = S.chat;
+  unsubChatDoc = onSnapshot(doc(db, "chats", c.id), (snap) => {
+    if (S.chat !== c) return;
+    c.exists = snap.exists();
+    c.meta = snap.exists() ? snap.data({ serverTimestamps: "estimate" }) : null;
+    updateTyping();
+  }, (err) => console.error("chat doc listener", err.code));
+}
+function updateTyping() {
+  const c = S.chat, el = $("#chatSub"); if (!c || !el) return;
+  const p = S.profiles.get(c.other) || {};
+  const ts = c.meta && c.meta.typing && c.meta.typing[c.other], tms = ts && ts.toMillis ? ts.toMillis() : 0;
+  const last = c.msgs[c.msgs.length - 1];
+  const lastIn = last && last.senderId === c.other ? ms(last.createdAt) : 0;
+  const typing = tms && Date.now() - tms < 5000 && tms > lastIn;
+  el.textContent = typing ? "typing…" : (p.username ? "@" + p.username : "");
+  clearTimeout(c.typingT);
+  if (typing) c.typingT = setTimeout(updateTyping, Math.max(300, 5200 - (Date.now() - tms)));
+}
+function pingTyping() {
+  const c = S.chat; if (!c || !c.exists) return;
+  const now = Date.now(); if (now - c.typingSent < 3500) return;
+  c.typingSent = now;
+  updateDoc(doc(db, "chats", c.id), { [`typing.${S.user.uid}`]: serverTimestamp() }).catch(() => {});
+}
+function renderReplyBar() {
+  const bar = $("#replyBar"), c = S.chat; if (!bar || !c) return;
+  if (!c.replyTo) { bar.hidden = true; bar.innerHTML = ""; return; }
+  const who = c.replyTo.senderId === S.user.uid ? "yourself" : ((S.profiles.get(c.replyTo.senderId) || {}).displayName || "them");
+  bar.hidden = false;
+  bar.innerHTML = `<div class="quote grow"><strong>Replying to ${esc(who)}</strong><div class="qtext">${esc(c.replyTo.text)}</div></div>
+    <button type="button" class="iconbtn" data-act="reply-cancel" aria-label="Cancel reply">✕</button>`;
 }
 function subscribeMessages() {
   stopMsgs();
@@ -427,7 +466,15 @@ function renderMessages() {
     const mine = m.senderId === me;
     const tick = !mine ? "" : m.pending ? `<span class="tick" role="img" aria-label="Sending">…</span>`
       : m.read ? `<span class="tick read" role="img" aria-label="Read">✓✓</span>` : `<span class="tick" role="img" aria-label="Sent">✓</span>`;
-    return `<div class="bubble${mine ? " me" : ""}">${esc(m.text)}<span class="t">${fmtStamp(m.createdAt && m.createdAt.toDate())} ${tick}</span></div>`;
+    const time = fmtStamp(m.createdAt && m.createdAt.toDate());
+    if (m.deleted) return `<div class="bubble deleted${mine ? " me" : ""}">This message was deleted<span class="t">${time}</span></div>`;
+    let quote = "";
+    if (m.replyTo) {
+      const orig = c.msgs.find((x) => x.id === m.replyTo.id);
+      const qWho = m.replyTo.senderId === me ? "You" : ((S.profiles.get(m.replyTo.senderId) || {}).displayName || "Them");
+      quote = `<div class="quote"><strong>${esc(qWho)}</strong><div class="qtext">${esc(orig && orig.deleted ? "Message deleted" : m.replyTo.text)}</div></div>`;
+    }
+    return `<div class="bubble${mine ? " me" : ""}" data-act="msg-menu" data-id="${esc(m.id)}" role="button" tabindex="0" aria-label="Message options">${quote}${esc(m.text)}<span class="t">${m.edited ? "edited · " : ""}${time} ${tick}</span></div>`;
   }).join("");
   el.innerHTML = html;
   const last = c.msgs[c.msgs.length - 1], grew = c.msgs.length > c.prevCount;
@@ -435,6 +482,7 @@ function renderMessages() {
   if (c.loadingOlder) el.scrollTop = el.scrollHeight - prevH + prevTop;
   else if (c.stick || nearBottom || (grew && last && last.senderId === me)) { el.scrollTop = el.scrollHeight; c.stick = false; }
   else el.scrollTop = prevTop;
+  updateTyping();
 }
 function markRead() {
   const c = S.chat; if (!c || document.visibilityState !== "visible") return;
@@ -450,11 +498,14 @@ function sendMessage(form) {
   const c = S.chat, ta = form.elements.text, text = ta.value.trim();
   if (!c || !text) return;
   ta.value = ""; autosize(ta); ta.focus();
-  const me = S.user.uid, batch = writeBatch(db);
-  batch.set(doc(collection(db, "chats", c.id, "messages")), { senderId: me, text, createdAt: serverTimestamp(), read: false });
+  const me = S.user.uid, batch = writeBatch(db), mref = doc(collection(db, "chats", c.id, "messages"));
+  const payload = { senderId: me, text, createdAt: serverTimestamp(), read: false };
+  if (c.replyTo) payload.replyTo = { id: c.replyTo.id, text: c.replyTo.text.slice(0, 100), senderId: c.replyTo.senderId };
+  c.replyTo = null; renderReplyBar();
+  batch.set(mref, payload);
   batch.set(doc(db, "chats", c.id), {
     members: [me, c.other].sort(),
-    lastMessage: { text: text.slice(0, 100), senderId: me },
+    lastMessage: { id: mref.id, text: text.slice(0, 100), senderId: me },
     lastMessageAt: serverTimestamp(),
     unread: { [c.other]: increment(1) }
   }, { merge: true });
@@ -466,6 +517,55 @@ function sendMessage(form) {
 }
 function autosize(t) { t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 120) + "px"; }
 
+/* ---------- message actions ---------- */
+function openMessageMenu(id) {
+  const c = S.chat, m = c && c.msgs.find((x) => x.id === id);
+  if (!m || m.deleted || m.pending) return;
+  const mine = m.senderId === S.user.uid;
+  openDialog(`<h2>Message</h2><div class="stack">
+    <button class="btn ghost" data-act="msg-reply" data-id="${esc(id)}">Reply</button>
+    <button class="btn ghost" data-act="msg-copy" data-id="${esc(id)}">Copy</button>
+    ${mine ? `<button class="btn ghost" data-act="msg-edit" data-id="${esc(id)}">Edit</button>
+    <button class="btn danger" data-act="msg-delete" data-id="${esc(id)}">Delete for everyone</button>` : ""}
+    <button class="linkbtn" data-act="close-dialog">Cancel</button></div>`);
+}
+function startReply(id) {
+  const c = S.chat, m = c.msgs.find((x) => x.id === id); closeDialog(); if (!m) return;
+  c.replyTo = { id: m.id, text: m.text, senderId: m.senderId }; renderReplyBar();
+  const ta = $("#msgInput"); if (ta) ta.focus();
+}
+async function copyMessage(id) {
+  const m = S.chat.msgs.find((x) => x.id === id); closeDialog(); if (!m) return;
+  try { await navigator.clipboard.writeText(m.text); toast("Copied"); } catch (e) { toast("Could not copy."); }
+}
+function openEditDialog(id) {
+  const m = S.chat.msgs.find((x) => x.id === id); if (!m) return;
+  S.chat.editing = id;
+  openDialog(`<h2>Edit message</h2><form data-form="editMessage" novalidate>
+    <div class="field"><label class="sr" for="editText">Message</label>
+      <textarea id="editText" name="text" rows="3" maxlength="2000">${esc(m.text)}</textarea></div>
+    <p id="dlgMsg" class="msg-error" role="alert"></p>
+    <div class="row"><button class="btn small" type="submit">Save</button>
+    <button class="btn ghost small" type="button" data-act="close-dialog">Cancel</button></div></form>`);
+}
+function lastMessageUpdate(c, id, text, deleted) {
+  const last = c.msgs[c.msgs.length - 1];
+  if (!last || last.id !== id) return null;
+  return { lastMessage: deleted ? { id, text: "", senderId: S.user.uid, deleted: true } : { id, text: text.slice(0, 100), senderId: S.user.uid } };
+}
+function openDeleteMessageDialog(id) {
+  openDialog(`<h2>Delete for everyone?</h2><p>The message text is removed for both of you. A "deleted" note stays in the chat.</p>
+    <div class="row"><button class="btn danger small" data-act="msg-delete-confirm" data-id="${esc(id)}">Delete</button>
+    <button class="btn ghost small" data-act="close-dialog">Cancel</button></div>`);
+}
+function deleteMessage(id) {
+  const c = S.chat; closeDialog();
+  const batch = writeBatch(db);
+  batch.update(doc(db, "chats", c.id, "messages", id), { text: "", deleted: true });
+  const lm = lastMessageUpdate(c, id, "", true); if (lm) batch.update(doc(db, "chats", c.id), lm);
+  batch.commit().catch((e) => { console.error("delete message", e.code); toast("Could not delete. Check your connection."); });
+}
+
 /* ---------- dialogs ---------- */
 function openDialog(html) { const d = $("#dlg"); d.innerHTML = html; if (!d.open) d.showModal(); }
 function closeDialog() { const d = $("#dlg"); if (d.open) d.close(); }
@@ -474,7 +574,8 @@ function openDeleteDialog() {
     <p>This permanently deletes your login, profile, username and contacts. Messages you already sent stay in other people's chats. This cannot be undone.</p>
     <form data-form="deleteAccount" novalidate>
       <div class="field"><label for="delPw">Enter your password to confirm</label>
-        <input id="delPw" name="password" type="password" autocomplete="current-password" required></div>
+        <div class="pw"><input id="delPw" name="password" type="password" autocomplete="current-password" required>
+        <button type="button" class="pwtoggle" data-act="toggle-pw" aria-label="Show password" aria-pressed="false">Show</button></div></div>
       <p id="dlgMsg" class="msg-error" role="alert"></p>
       <div class="row"><button class="btn danger small" type="submit">Delete account</button>
       <button class="btn ghost small" type="button" data-act="close-dialog">Cancel</button></div></form>`);
@@ -524,6 +625,19 @@ const forms = {
     toast("Profile saved"); render();
   },
   async send(f) { sendMessage(f); },
+  async editMessage(f) {
+    const c = S.chat, id = c.editing, text = f.text.value.trim();
+    const err = (t) => { const el = $("#dlgMsg"); if (el) el.textContent = t; };
+    const m = c.msgs.find((x) => x.id === id);
+    if (!text) return err("Message cannot be empty.");
+    if (!m || m.deleted) return closeDialog();
+    if (text === m.text) return closeDialog();
+    const batch = writeBatch(db);
+    batch.update(doc(db, "chats", c.id, "messages", id), { text, edited: true });
+    const lm = lastMessageUpdate(c, id, text, false); if (lm) batch.update(doc(db, "chats", c.id), lm);
+    batch.commit().catch((e) => { console.error("edit message", e.code); toast("Could not save the edit. Check your connection."); });
+    closeDialog();
+  },
   async deleteAccount(f) {
     const user = auth.currentUser, uid = user.uid, username = S.profile.username;
     const err = (t) => { const el = $("#dlgMsg"); if (el) el.textContent = t; };
@@ -573,6 +687,18 @@ const actions = {
   "open-chat": (t) => openChat(t.dataset.uid),
   back: () => { if (history.state && history.state.chat) history.back(); else closeChat(); },
   older: () => { const c = S.chat; c.limit += PAGE; c.loadingOlder = true; setTimeout(() => { c.loadingOlder = false; }, 5000); subscribeMessages(); },
+  "toggle-pw": (t) => {
+    const i = t.previousElementSibling, show = i.type === "password";
+    i.type = show ? "text" : "password"; t.textContent = show ? "Hide" : "Show";
+    t.setAttribute("aria-pressed", String(show)); t.setAttribute("aria-label", show ? "Hide password" : "Show password");
+  },
+  "msg-menu": (t) => openMessageMenu(t.dataset.id),
+  "msg-reply": (t) => startReply(t.dataset.id),
+  "msg-copy": (t) => copyMessage(t.dataset.id),
+  "msg-edit": (t) => openEditDialog(t.dataset.id),
+  "msg-delete": (t) => openDeleteMessageDialog(t.dataset.id),
+  "msg-delete-confirm": (t) => deleteMessage(t.dataset.id),
+  "reply-cancel": () => { S.chat.replyTo = null; renderReplyBar(); },
   "add-contact": (t) => addContact(t.dataset.uid),
   "remove-contact": (t) => removeContact(t.dataset.uid),
   invite,
@@ -588,7 +714,7 @@ document.addEventListener("click", (e) => {
 });
 document.addEventListener("input", (e) => {
   const id = e.target.id;
-  if (id === "msgInput") autosize(e.target);
+  if (id === "msgInput") { autosize(e.target); pingTyping(); }
   else if (id === "chatSearch") renderChatList();
   else if (id === "userSearch") { clearTimeout(searchTimer); searchTimer = setTimeout(runUserSearch, 350); }
 });
@@ -596,6 +722,10 @@ document.addEventListener("keydown", (e) => {
   if (e.target.id === "msgInput" && e.key === "Enter" && !e.shiftKey && matchMedia("(pointer:fine)").matches) {
     e.preventDefault(); e.target.form.requestSubmit();
   }
+});
+document.addEventListener("keydown", (e) => {
+  const b = e.target.closest && e.target.closest('.bubble[data-act="msg-menu"]');
+  if (b && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openMessageMenu(b.dataset.id); }
 });
 document.addEventListener("visibilitychange", markRead);
 window.addEventListener("offline", () => toast("You are offline. Messages send when you reconnect, but only while this app stays open."));
